@@ -36,7 +36,7 @@ function haversine(lat1, lon1, lat2, lon2) {
 function getNextCityInfo(lat, lon) {
   const n = CITIES.length;
   
-  // 1. Ищем ближайший город к текущей точке
+  // 1. Ищем ближайший город
   let nearestIdx = 0;
   let minDist = Infinity;
 
@@ -48,21 +48,23 @@ function getNextCityInfo(lat, lon) {
     }
   }
 
-  // 2. Определяем индекс города, от которого считаем
-  // Если мы ближе 35 км к городу, значит мы в нём (или на подъезде). 
-  // Берем этот город как отправную точку для поиска следующего.
-  let fromIdx = nearestIdx;
-  
-  // Если мы стоим в самом городе (меньше 35 км), то следующий — это +1
-  // Если мы уже далеко от него (в пути), то ближайший город — это следующий.
-  if (minDist > 35000) {
-     fromIdx = Math.max(0, nearestIdx - 1); 
+  // 2. Определяем, откуда считаем
+  // Если мы находимся в радиусе 40 км от города, значит мы "в нём".
+  // Тогда пройденным считаем ЭТОТ город, а следующим будет nextIdx = nearestIdx + 1.
+  let fromIdx;
+  if (minDist < 40000) {
+    fromIdx = nearestIdx; 
+  } else {
+    // Если мы далеко от всех городов (в глухой трассе),
+    // то ближайший впереди — это следующий. Отправная точка — предыдущий.
+    fromIdx = Math.max(0, nearestIdx - 1);
   }
 
+  // Следующий город
   const nextIdx = Math.min(n - 1, fromIdx + 1);
   const nextCity = CITIES[nextIdx];
 
-  // 3. Считаем километры по дороге
+  // 3. Считаем километры
   const roadTotal = ROAD_TO_NEXT[fromIdx] || 0;
   const straightTotal = haversine(CITIES[fromIdx].lat, CITIES[fromIdx].lon, nextCity.lat, nextCity.lon);
   const straightDone = haversine(CITIES[fromIdx].lat, CITIES[fromIdx].lon, lat, lon);
@@ -84,12 +86,7 @@ function fetchLocation() {
         try {
           const json = JSON.parse(data);
           if (!json || !json.location) return reject(new Error('no location'));
-          
-          // Проверяем, насколько свежие данные (опционально)
-          const ts = json.updatedAt || Date.now();
-          const ageMins = Math.round((Date.now() - ts) / 60000);
-          
-          resolve({ lat: json.location.latitude, lon: json.location.longitude, ageMins });
+          resolve({ lat: json.location.latitude, lon: json.location.longitude });
         } catch (e) { reject(e); }
       });
     }).on('error', reject);
@@ -100,17 +97,11 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   
   try {
-    const { lat, lon, ageMins } = await fetchLocation();
+    const { lat, lon } = await fetchLocation();
     const { nextCity, distKm } = getNextCityInfo(lat, lon);
     
     const display = distKm < 10 ? distKm.toFixed(1) : Math.round(distKm);
-    
-    // Выводим город и расстояние. 
-    // Если данные старые, можно добавить приписку (но для Nightbot лучше просто текст)
-    let text = `До ${nextCity} осталось ${display} км`;
-    if (ageMins > 5) text += ` (GPS обновлен ${ageMins} мин. назад)`;
-    
-    res.end(text);
+    res.end(`До ${nextCity} осталось ${display} км`);
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
   }
