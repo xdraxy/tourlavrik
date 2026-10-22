@@ -7,7 +7,9 @@ const KRASNOYARSK = { lat: 56.0153, lon: 92.8932 };
 const IRKUTSK = { lat: 52.2870, lon: 104.3050 };
 const VLADIVOSTOK = { lat: 43.1155, lon: 131.8855 };
 
+// Реальное расстояние по трассе от Красноярска до Иркутска
 const ROAD_KRAS_TO_IRK = 1060;
+// Расстояние от Красноярска до Владивостока
 const ROAD_KRAS_TO_VLAD = 4836;
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -31,7 +33,6 @@ function fetchLocation() {
           const json = JSON.parse(data);
           if (!json || !json.location) return reject(new Error('no location'));
           
-          // Достаем координаты и скорость (в м/с)
           resolve({ 
             lat: json.location.latitude, 
             lon: json.location.longitude,
@@ -43,7 +44,6 @@ function fetchLocation() {
   });
 }
 
-// Функция для форматирования времени (переводит часы в "ЧЧч ММм")
 function formatTime(hours) {
   if (!isFinite(hours) || hours <= 0) return "в пути";
   const h = Math.floor(hours);
@@ -58,67 +58,50 @@ const server = http.createServer(async (req, res) => {
   try {
     const { lat, lon, speedMs } = await fetchLocation();
     
-    // Переводим скорость из м/с в км/ч
+    // Скорость км/ч. Если стоят - берем 40 для расчета
     const speedKmh = speedMs * 3.6;
-    
-    // Если скорость ниже 5 км/ч (пробка или остановка), 
-    // берем минимальную скорость 40 км/ч для расчета, чтобы не показывать "100 часов в пути"
     const calcSpeed = speedKmh > 5 ? speedKmh : 40;
 
-    const distToKras = haversine(lat, lon, KRASNOYARSK.lat, KRASNOYARSK.lon) / 1000;
+    // Расстояние от текущей точки до Иркутска по прямой
+    const straightToIrk = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon) / 1000;
     
-    let nextCityName = "Иркутска";
+    // Расстояние от Красноярска до Иркутска по прямой
+    const straightKrasToIrk = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, IRKUTSK.lat, IRKUTSK.lon) / 1000;
+
     let distNext = 0;
-    let distVlad = 0;
 
-    if (distToKras < 50) {
-      // В радиусе 50 км от Красноярска
-      const straightTotal = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, IRKUTSK.lat, IRKUTSK.lon);
-      const straightRemaining = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon);
-      let fraction = 1 - (straightRemaining / straightTotal);
-      fraction = Math.max(0, Math.min(1, fraction));
+    // Если мы находимся между Красноярском и Иркутском (то есть в пути)
+    // Или если мы всё еще в Красноярске
+    if (straightToIrk < straightKrasToIrk) {
+      // Рассчитываем пропорцию: сколько прямых километров мы проехали от Красноярска
+      let fractionDone = 1 - (straightToIrk / straightKrasToIrk);
+      fractionDone = Math.max(0, Math.min(1, fractionDone));
       
-      distNext = ROAD_KRAS_TO_IRK * (1 - fraction);
-      if (distNext > ROAD_KRAS_TO_IRK) distNext = ROAD_KRAS_TO_IRK;
-
-      const straightTotalVlad = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
-      const straightRemainingVlad = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
-      let fractionVlad = 1 - (straightRemainingVlad / straightTotalVlad);
-      fractionVlad = Math.max(0, Math.min(1, fractionVlad));
-      
-      distVlad = ROAD_KRAS_TO_VLAD * (1 - fractionVlad);
-      if (distVlad > ROAD_KRAS_TO_VLAD) distVlad = ROAD_KRAS_TO_VLAD;
-
+      // Переводим эту пропорцию в дорожные километры
+      distNext = ROAD_KRAS_TO_IRK * (1 - fractionDone);
     } else {
-      // Дальше 50 км от Красноярска
-      const distToIrkutsk = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon) / 1000;
-      const distToUlanUde = haversine(lat, lon, 51.8335, 107.5841) / 1000;
-      
-      if (distToIrkutsk < distToUlanUde) {
-         nextCityName = "Иркутска";
-         distNext = ROAD_KRAS_TO_IRK - (haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, lat, lon) / 1000);
-      } else {
-         nextCityName = "Улан-Удэ";
-         distNext = 460 - (distToIrkutsk);
-      }
-      
-      if (distNext < 0) distNext = 0;
-
-      const straightTotalVlad = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
-      const straightRemainingVlad = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
-      let fractionVlad = 1 - (straightRemainingVlad / straightTotalVlad);
-      fractionVlad = Math.max(0, Math.min(1, fractionVlad));
-      distVlad = ROAD_KRAS_TO_VLAD * (1 - fractionVlad);
+      // Если GPS скакнул назад, показываем полное расстояние
+      distNext = ROAD_KRAS_TO_IRK;
     }
 
-    // Считаем время до следующего города
+    // Расстояние до Владивостока (считаем так же пропорционально)
+    const straightToVlad = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon) / 1000;
+    const straightKrasToVlad = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon) / 1000;
+    
+    let fractionToVlad = 1 - (straightToVlad / straightKrasToVlad);
+    fractionToVlad = Math.max(0, Math.min(1, fractionToVlad));
+    let distVlad = ROAD_KRAS_TO_VLAD * (1 - fractionToVlad);
+    if (distVlad > ROAD_KRAS_TO_VLAD) distVlad = ROAD_KRAS_TO_VLAD;
+
+    // Считаем время до Иркутска
     const timeToNextHours = distNext / calcSpeed;
     const timeString = formatTime(timeToNextHours);
 
     const displayNext = distNext < 10 ? distNext.toFixed(1) : Math.round(distNext);
     const displayVlad = Math.round(distVlad);
     
-    res.end(`До ${nextCityName}: ${displayNext} км (в пути ~${timeString}) | До Владивостока: ${displayVlad} км`);
+    // Вывод: До Иркутска: 885 км (в пути ~11 ч. 30 мин.) | До Владивостока: 4660 км
+    res.end(`До Иркутска: ${displayNext} км (в пути ~${timeString}) | До Владивостока: ${displayVlad} км`);
     
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
