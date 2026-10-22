@@ -3,14 +3,29 @@ const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
 
-// ЭТАЛОННАЯ ТОЧКА (где мы решили, что до Иркутска ровно 609 км).
-// Скрипт запомнит её при самом первом запуске и будет считать отклонения от неё.
-let anchorLat = null;
-let anchorLon = null;
+// Список городов с координатами и правильными падежами
+// lastCase - "выехали с (чего?)" (Родительный падеж)
+// nextCase - "доехать до (чего?)" (Родительный падеж)
+const CITIES = [
+  { name: 'Москвы',       nextCase: 'Владимира',     lat: 55.7558, lon: 37.6173 },
+  { name: 'Владимира',    nextCase: 'Казани',        lat: 56.1290, lon: 40.4070 },
+  { name: 'Казани',       nextCase: 'Екатеринбурга', lat: 55.7963, lon: 49.1088 },
+  { name: 'Екатеринбурга',nextCase: 'Тюмени',        lat: 56.8389, lon: 60.6057 },
+  { name: 'Тюмени',       nextCase: 'Омска',         lat: 57.1522, lon: 65.5272 },
+  { name: 'Омска',        nextCase: 'Новосибирска',  lat: 54.9885, lon: 73.3242 },
+  { name: 'Новосибирска', nextCase: 'Кемерово',      lat: 55.0084, lon: 82.9357 }, // Кемерово не склоняется
+  { name: 'Кемерово',     nextCase: 'Красноярска',   lat: 55.3547, lon: 86.0873 },
+  { name: 'Красноярска',  nextCase: 'Иркутска',      lat: 56.0153, lon: 92.8932 },
+  { name: 'Иркутска',     nextCase: 'Улан-Удэ',      lat: 52.2870, lon: 104.3050 }, // Улан-Удэ не склоняется
+  { name: 'Улан-Удэ',     nextCase: 'Читы',          lat: 51.8335, lon: 107.5841 },
+  { name: 'Читы',         nextCase: 'Благовещенска', lat: 52.0340, lon: 113.4994 },
+  { name: 'Благовещенска',nextCase: 'Хабаровска',    lat: 50.2907, lon: 127.5272 },
+  { name: 'Хабаровска',   nextCase: 'Владивостока',  lat: 48.4827, lon: 135.0838 },
+  { name: 'Владивостока', nextCase: 'ФИНИШ',         lat: 43.1155, lon: 131.8855 }
+];
 
-// Стартовые значения километров в этой точке
-const BASE_DIST_IRK = 609;
-const BASE_DIST_VLAD = 4480;
+// Расстояния по дороге между соседними городами (в км)
+const ROAD_DISTANCES = [185, 400, 380, 320, 550, 650, 260, 410, 1060, 460, 670, 980, 580, 760];
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -34,8 +49,7 @@ function fetchLocation() {
           if (!json || !json.location) return reject(new Error('no location'));
           resolve({ 
             lat: json.location.latitude, 
-            lon: json.location.longitude,
-            speedMs: typeof json.speed === 'number' ? json.speed : 0 
+            lon: json.location.longitude 
           });
         } catch (e) { reject(e); }
       });
@@ -43,46 +57,74 @@ function fetchLocation() {
   });
 }
 
-function formatTime(hours) {
-  if (!isFinite(hours) || hours <= 0) return "в пути";
-  const h = Math.floor(hours);
-  const m = Math.round((hours - h) * 60);
-  if (h === 0) return `${m} мин.`;
-  return `${h} ч. ${m} мин.`;
-}
-
 const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   
   try {
-    const { lat, lon, speedMs } = await fetchLocation();
+    const { lat, lon } = await fetchLocation();
     
-    // Если это самый первый запрос после включения/перезагрузки сервера
-    if (anchorLat === null || anchorLon === null) {
-      anchorLat = lat;
-      anchorLon = lon;
+    let currentCityIdx = 0;
+    let minDistance = Infinity;
+
+    // 1. Находим ближайший город к текущей точке
+    for (let i = 0; i < CITIES.length; i++) {
+      const d = haversine(lat, lon, CITIES[i].lat, CITIES[i].lon) / 1000;
+      if (d < minDistance) {
+        minDistance = d;
+        currentCityIdx = i;
+      }
     }
 
-    // 1. Считаем, на сколько километров по прямой блогеры сдвинулись от ЭТАЛОННОЙ точки
-    const deltaKm = haversine(anchorLat, anchorLon, lat, lon) / 1000;
+    // 2. Определяем, отъехали ли мы от этого города на 100+ км
+    let passedIdx = currentCityIdx;
     
-    // 2. Вычитаем этот сдвиг из базовых значений
-    let currentDistIrk = BASE_DIST_IRK - deltaKm;
-    let currentDistVlad = BASE_DIST_VLAD - deltaKm;
+    if (minDistance > 100) {
+      // Если мы находимся дальше 100 км от ближайшего города, 
+      // значит, мы точно выехали из предыдущего. 
+      // Чтобы понять, куда мы едем, смотрим на следующий город.
+      if (currentCityIdx < CITIES.length - 1) {
+        passedIdx = currentCityIdx;
+      }
+    } else {
+      // Если мы в пределах 100 км от текущего города, 
+      // значит, мы из него выехали (или все еще в нем), и едем в следующий.
+      passedIdx = currentCityIdx;
+    }
 
-    // Защита от того, чтобы километры ушли в минус
-    if (currentDistIrk < 0) currentDistIrk = 0;
-    if (currentDistVlad < 0) currentDistVlad = 0;
+    // Защита от выхода за границы массива
+    if (passedIdx >= CITIES.length - 1) passedIdx = CITIES.length - 2;
+    if (passedIdx < 0) passedIdx = 0;
 
-    // 3. Расчет времени в пути
-    const speedKmh = speedMs * 3.6;
-    const calcSpeed = speedKmh > 5 ? speedKmh : 60; // Если стоят, берем 60 км/ч
-    const timeString = formatTime(currentDistIrk / calcSpeed);
-
-    const displayNext = currentDistIrk < 10 ? currentDistIrk.toFixed(1) : Math.round(currentDistIrk);
-    const displayVlad = Math.round(currentDistVlad);
+    const lastCity = CITIES[passedIdx];
+    const nextCity = CITIES[passedIdx + 1];
     
-    res.end(`До Иркутска: ${displayNext} км (в пути ~${timeString}) | До Владивостока: ${displayVlad} км`);
+    // 3. Считаем расстояние по дороге до следующего города
+    const roadTotal = ROAD_DISTANCES[passedIdx];
+    const straightTotal = haversine(lastCity.lat, lastCity.lon, nextCity.lat, nextCity.lon);
+    const straightDone = haversine(lastCity.lat, lastCity.lon, lat, lon);
+    
+    let fraction = straightTotal > 0 ? straightDone / straightTotal : 0;
+    fraction = Math.max(0, Math.min(1, fraction));
+    
+    let distToNext = roadTotal * (1 - fraction);
+    if (distToNext < 0) distToNext = 0;
+
+    const displayDist = distToNext < 10 ? distToNext.toFixed(1) : Math.round(distToNext);
+
+    // 4. Формируем сообщение
+    // Если мы уже приехали в следующий город (расстояние меньше 20 км), 
+    // то "выехали с" будет уже этот следующий город, и цель сдвинется.
+    if (displayDist < 20 && passedIdx < CITIES.length - 2) {
+       const newLast = CITIES[passedIdx + 1];
+       const newNext = CITIES[passedIdx + 2];
+       // Расстояние до нового следующего города
+       const newRoadTotal = ROAD_DISTANCES[passedIdx + 1];
+       // (тут можно оставить простой вывод, так как они только что приехали)
+       res.end(`Мы выехали с ${newLast.name}, до ${newNext.nextCase} осталось ${newRoadTotal} км`);
+       return;
+    }
+
+    res.end(`Мы выехали с ${lastCity.name}, до ${nextCity.nextCase} осталось ${displayDist} км`);
     
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
