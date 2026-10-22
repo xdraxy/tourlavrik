@@ -3,15 +3,14 @@ const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
 
-// Стартовые значения, которые мы привязываем к текущей точке
-const START_DIST_IRK = 609;
-const START_DIST_VLAD = 4480;
-
-// Переменные для запоминания точки калибровки
+// ЭТАЛОННАЯ ТОЧКА (где мы решили, что до Иркутска ровно 609 км).
+// Скрипт запомнит её при самом первом запуске и будет считать отклонения от неё.
 let anchorLat = null;
 let anchorLon = null;
-let currentDistIrk = START_DIST_IRK;
-let currentDistVlad = START_DIST_VLAD;
+
+// Стартовые значения километров в этой точке
+const BASE_DIST_IRK = 609;
+const BASE_DIST_VLAD = 4480;
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -57,38 +56,28 @@ const server = http.createServer(async (req, res) => {
   
   try {
     const { lat, lon, speedMs } = await fetchLocation();
-    const speedKmh = speedMs * 3.6;
-    const calcSpeed = speedKmh > 5 ? speedKmh : 60; // Если стоят, берем 60 км/ч
-
-    // Если это первый запрос (сервер только что проснулся или запустился)
+    
+    // Если это самый первый запрос после включения/перезагрузки сервера
     if (anchorLat === null || anchorLon === null) {
       anchorLat = lat;
       anchorLon = lon;
-      // Принудительно ставим значения, которые ты просил
-      currentDistIrk = START_DIST_IRK;
-      currentDistVlad = START_DIST_VLAD;
-    } else {
-      // Считаем, на сколько километров сдвинулись блогеры
-      const deltaKm = haversine(anchorLat, anchorLon, lat, lon) / 1000;
-      
-      // Если сдвинулись вперед (но не больше 50 км за раз, защита от глюков GPS)
-      if (deltaKm > 0.01 && deltaKm < 50) {
-        // Так как они едут в сторону Иркутска и Владивостока, вычитаем пройденное
-        currentDistIrk -= deltaKm;
-        currentDistVlad -= deltaKm;
-        
-        // Обновляем точку отсчета для следующего шага
-        anchorLat = lat;
-        anchorLon = lon;
-      }
     }
 
-    // Защита от ухода в минус
+    // 1. Считаем, на сколько километров по прямой блогеры сдвинулись от ЭТАЛОННОЙ точки
+    const deltaKm = haversine(anchorLat, anchorLon, lat, lon) / 1000;
+    
+    // 2. Вычитаем этот сдвиг из базовых значений
+    let currentDistIrk = BASE_DIST_IRK - deltaKm;
+    let currentDistVlad = BASE_DIST_VLAD - deltaKm;
+
+    // Защита от того, чтобы километры ушли в минус
     if (currentDistIrk < 0) currentDistIrk = 0;
     if (currentDistVlad < 0) currentDistVlad = 0;
 
-    const timeToNextHours = currentDistIrk / calcSpeed;
-    const timeString = formatTime(timeToNextHours);
+    // 3. Расчет времени в пути
+    const speedKmh = speedMs * 3.6;
+    const calcSpeed = speedKmh > 5 ? speedKmh : 60; // Если стоят, берем 60 км/ч
+    const timeString = formatTime(currentDistIrk / calcSpeed);
 
     const displayNext = currentDistIrk < 10 ? currentDistIrk.toFixed(1) : Math.round(currentDistIrk);
     const displayVlad = Math.round(currentDistVlad);
