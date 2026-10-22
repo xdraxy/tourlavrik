@@ -3,12 +3,10 @@ const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
 
-// Координаты ключевых точек
 const KRASNOYARSK = { lat: 56.0153, lon: 92.8932 };
 const IRKUTSK = { lat: 52.2870, lon: 104.3050 };
 const VLADIVOSTOK = { lat: 43.1155, lon: 131.8855 };
 
-// Реальные дорожные расстояния (км)
 const ROAD_KRAS_TO_IRK = 1060;
 const ROAD_KRAS_TO_VLAD = 4836;
 
@@ -32,43 +30,59 @@ function fetchLocation() {
         try {
           const json = JSON.parse(data);
           if (!json || !json.location) return reject(new Error('no location'));
-          resolve({ lat: json.location.latitude, lon: json.location.longitude });
+          
+          // Достаем координаты и скорость (в м/с)
+          resolve({ 
+            lat: json.location.latitude, 
+            lon: json.location.longitude,
+            speedMs: typeof json.speed === 'number' ? json.speed : 0 
+          });
         } catch (e) { reject(e); }
       });
     }).on('error', reject);
   });
 }
 
+// Функция для форматирования времени (переводит часы в "ЧЧч ММм")
+function formatTime(hours) {
+  if (!isFinite(hours) || hours <= 0) return "в пути";
+  const h = Math.floor(hours);
+  const m = Math.round((hours - h) * 60);
+  if (h === 0) return `${m} мин.`;
+  return `${h} ч. ${m} мин.`;
+}
+
 const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   
   try {
-    const { lat, lon } = await fetchLocation();
+    const { lat, lon, speedMs } = await fetchLocation();
     
-    // 1. Проверяем, насколько мы близко к Красноярску
+    // Переводим скорость из м/с в км/ч
+    const speedKmh = speedMs * 3.6;
+    
+    // Если скорость ниже 5 км/ч (пробка или остановка), 
+    // берем минимальную скорость 40 км/ч для расчета, чтобы не показывать "100 часов в пути"
+    const calcSpeed = speedKmh > 5 ? speedKmh : 40;
+
     const distToKras = haversine(lat, lon, KRASNOYARSK.lat, KRASNOYARSK.lon) / 1000;
     
     let nextCityName = "Иркутска";
     let distNext = 0;
     let distVlad = 0;
 
-    // ИЗМЕНЕНО: Если мы в радиусе 50 км от Красноярска, считаем строго до Иркутска
     if (distToKras < 50) {
-      
-      // Считаем до Иркутска
+      // В радиусе 50 км от Красноярска
       const straightTotal = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, IRKUTSK.lat, IRKUTSK.lon);
       const straightRemaining = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon);
-      
       let fraction = 1 - (straightRemaining / straightTotal);
       fraction = Math.max(0, Math.min(1, fraction));
       
       distNext = ROAD_KRAS_TO_IRK * (1 - fraction);
       if (distNext > ROAD_KRAS_TO_IRK) distNext = ROAD_KRAS_TO_IRK;
 
-      // Считаем до Владивостока (от Красноярска)
       const straightTotalVlad = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
       const straightRemainingVlad = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
-      
       let fractionVlad = 1 - (straightRemainingVlad / straightTotalVlad);
       fractionVlad = Math.max(0, Math.min(1, fractionVlad));
       
@@ -76,9 +90,9 @@ const server = http.createServer(async (req, res) => {
       if (distVlad > ROAD_KRAS_TO_VLAD) distVlad = ROAD_KRAS_TO_VLAD;
 
     } else {
-      // Если мы уехали дальше 50 км от Красноярска
+      // Дальше 50 км от Красноярска
       const distToIrkutsk = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon) / 1000;
-      const distToUlanUde = haversine(lat, lon, 51.8335, 107.5841) / 1000; // Улан-Удэ
+      const distToUlanUde = haversine(lat, lon, 51.8335, 107.5841) / 1000;
       
       if (distToIrkutsk < distToUlanUde) {
          nextCityName = "Иркутска";
@@ -90,7 +104,6 @@ const server = http.createServer(async (req, res) => {
       
       if (distNext < 0) distNext = 0;
 
-      // Считаем до Владивостока
       const straightTotalVlad = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
       const straightRemainingVlad = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
       let fractionVlad = 1 - (straightRemainingVlad / straightTotalVlad);
@@ -98,10 +111,14 @@ const server = http.createServer(async (req, res) => {
       distVlad = ROAD_KRAS_TO_VLAD * (1 - fractionVlad);
     }
 
+    // Считаем время до следующего города
+    const timeToNextHours = distNext / calcSpeed;
+    const timeString = formatTime(timeToNextHours);
+
     const displayNext = distNext < 10 ? distNext.toFixed(1) : Math.round(distNext);
     const displayVlad = Math.round(distVlad);
     
-    res.end(`До ${nextCityName}: ${displayNext} км | До Владивостока: ${displayVlad} км`);
+    res.end(`До ${nextCityName}: ${displayNext} км (в пути ~${timeString}) | До Владивостока: ${displayVlad} км`);
     
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
