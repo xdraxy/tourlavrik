@@ -12,10 +12,6 @@ const VLADIVOSTOK = { lat: 43.1155, lon: 131.8855 };
 const ROAD_TO_IRKUTSK = 1060; 
 const ROAD_TO_VLADIVOSTOK = 4836; // От Красноярска до Владивостока
 
-// Общий пробег от Москвы
-const TOTAL_FROM_MOSCOW = 9000;
-const PASSED_FROM_MOSCOW = 4170; // Текущий пробег
-
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -65,14 +61,11 @@ const server = http.createServer(async (req, res) => {
     let distToVlad = ROAD_TO_VLADIVOSTOK * (1 - fractionToVlad);
     if (distToVlad > ROAD_TO_VLADIVOSTOK) distToVlad = ROAD_TO_VLADIVOSTOK;
 
-    // Форматируем
+    // Форматируем (без лишних нулей)
     const displayIrk = distToIrkutsk < 10 ? distToIrkutsk.toFixed(1) : Math.round(distToIrkutsk);
     const displayVlad = distToVlad < 10 ? distToVlad.toFixed(1) : Math.round(distToVlad);
     
-    // Расчет оставшегося до Владивостока (общий)
-    const remainingToVladTotal = TOTAL_FROM_MOSCOW - PASSED_FROM_MOSCOW;
-
-    res.end(`До Иркутска: ${displayIrk} км | До Владивостока: ${displayVlad} км (всего осталось ${remainingToVladTotal} км)`);
+    res.end(`До Иркутска: ${displayIrk} км | До Владивостока: ${displayVlad} км`);
     
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
