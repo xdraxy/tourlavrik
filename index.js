@@ -3,12 +3,14 @@ const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
 
-// Жестко задаем координаты Иркутска и расстояние по трассе от Красноярска
-const IRKUTSK = { name: 'Иркутска', lat: 52.2870, lon: 104.3050 };
-const ROAD_FROM_KRASNOYARSK_TO_IRKUTSK = 1060; 
-
-// Координаты Красноярска (отправная точка)
+// Координаты точек маршрута
 const KRASNOYARSK = { lat: 56.0153, lon: 92.8932 };
+const IRKUTSK = { lat: 52.2870, lon: 104.3050 };
+const VLADIVOSTOK = { lat: 43.1155, lon: 131.8855 };
+
+// Расстояние по трассам (в км)
+const ROAD_TO_IRKUTSK = 1060; 
+const ROAD_TO_VLADIVOSTOK = 4460; // Общее расстояние от Красноярска до Владивостока
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -43,28 +45,31 @@ const server = http.createServer(async (req, res) => {
   try {
     const { lat, lon } = await fetchLocation();
     
-    // 1. Считаем расстояние по прямой от Красноярска до Иркутска
-    const straightTotal = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, IRKUTSK.lat, IRKUTSK.lon);
+    // === СЧИТАЕМ ДО ИРКУТСКА ===
+    const straightToIrkutskTotal = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, IRKUTSK.lat, IRKUTSK.lon);
+    const straightToIrkutskRemaining = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon);
     
-    // 2. Считаем расстояние по прямой от текущей точки блогеров до Иркутска
-    const straightRemaining = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon);
+    let fractionToIrkutsk = 1 - (straightToIrkutskRemaining / straightToIrkutskTotal);
+    fractionToIrkutsk = Math.max(0, Math.min(1, fractionToIrkutsk));
     
-    // 3. Вычисляем, сколько они уже проехали (в пропорции)
-    // Если они в Красноярске, то remaining = total, прогресс = 0.
-    // Чем ближе к Иркутску, тем меньше remaining.
-    let fractionDone = 1 - (straightRemaining / straightTotal);
-    
-    // Ограничиваем значения от 0 до 1 (на случай если GPS скакнет)
-    fractionDone = Math.max(0, Math.min(1, fractionDone));
-    
-    // 4. Считаем километры по дороге, умножая оставшуюся долю на 1060 км
-    let distKm = ROAD_FROM_KRASNOYARSK_TO_IRKUTSK * (1 - fractionDone);
-    
-    // Если каким-то чудом получилось больше 1060 (глюк GPS), ставим 1060
-    if (distKm > ROAD_FROM_KRASNOYARSK_TO_IRKUTSK) distKm = ROAD_FROM_KRASNOYARSK_TO_IRKUTSK;
+    let distToIrkutsk = ROAD_TO_IRKUTSK * (1 - fractionToIrkutsk);
+    if (distToIrkutsk > ROAD_TO_IRKUTSK) distToIrkutsk = ROAD_TO_IRKUTSK;
 
-    const display = distKm < 10 ? distKm.toFixed(1) : Math.round(distKm);
-    res.end(`До ${IRKUTSK.name} осталось ${display} км`);
+    // === СЧИТАЕМ ДО ВЛАДИВОСТОКА ===
+    const straightToVladTotal = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
+    const straightToVladRemaining = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon);
+    
+    let fractionToVlad = 1 - (straightToVladRemaining / straightToVladTotal);
+    fractionToVlad = Math.max(0, Math.min(1, fractionToVlad));
+    
+    let distToVlad = ROAD_TO_VLADIVOSTOK * (1 - fractionToVlad);
+    if (distToVlad > ROAD_TO_VLADIVOSTOK) distToVlad = ROAD_TO_VLADIVOSTOK;
+
+    // Форматируем красиво (без .0)
+    const displayIrk = distToIrkutsk < 10 ? distToIrkutsk.toFixed(1) : Math.round(distToIrkutsk);
+    const displayVlad = distToVlad < 10 ? distToVlad.toFixed(1) : Math.round(distToVlad);
+    
+    res.end(`До Иркутска: ${displayIrk} км | До Владивостока: ${displayVlad} км`);
     
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
