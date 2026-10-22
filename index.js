@@ -3,14 +3,13 @@ const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
 
-const KRASNOYARSK = { lat: 56.0153, lon: 92.8932 };
-const IRKUTSK = { lat: 52.2870, lon: 104.3050 };
-const VLADIVOSTOK = { lat: 43.1155, lon: 131.8855 };
+// Отправные значения расстояний
+let currentDistToIrk = 880;
+let currentDistToVlad = 4745; // Примерное расстояние до Владивостока от текущей точки
 
-// Реальное расстояние по трассе от Красноярска до Иркутска
-const ROAD_KRAS_TO_IRK = 1060;
-// Расстояние от Красноярска до Владивостока
-const ROAD_KRAS_TO_VLAD = 4836;
+// Переменные для отслеживания координат
+let lastLat = null;
+let lastLon = null;
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -58,49 +57,39 @@ const server = http.createServer(async (req, res) => {
   try {
     const { lat, lon, speedMs } = await fetchLocation();
     
-    // Скорость км/ч. Если стоят - берем 40 для расчета
     const speedKmh = speedMs * 3.6;
-    const calcSpeed = speedKmh > 5 ? speedKmh : 40;
+    const calcSpeed = speedKmh > 5 ? speedKmh : 60; // Если стоят, берем 60 км/ч
 
-    // Расстояние от текущей точки до Иркутска по прямой
-    const straightToIrk = haversine(lat, lon, IRKUTSK.lat, IRKUTSK.lon) / 1000;
-    
-    // Расстояние от Красноярска до Иркутска по прямой
-    const straightKrasToIrk = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, IRKUTSK.lat, IRKUTSK.lon) / 1000;
-
-    let distNext = 0;
-
-    // Если мы находимся между Красноярском и Иркутском (то есть в пути)
-    // Или если мы всё еще в Красноярске
-    if (straightToIrk < straightKrasToIrk) {
-      // Рассчитываем пропорцию: сколько прямых километров мы проехали от Красноярска
-      let fractionDone = 1 - (straightToIrk / straightKrasToIrk);
-      fractionDone = Math.max(0, Math.min(1, fractionDone));
-      
-      // Переводим эту пропорцию в дорожные километры
-      distNext = ROAD_KRAS_TO_IRK * (1 - fractionDone);
+    if (lastLat === null || lastLon === null) {
+      // Первый запрос: просто запоминаем координаты
+      lastLat = lat;
+      lastLon = lon;
     } else {
-      // Если GPS скакнул назад, показываем полное расстояние
-      distNext = ROAD_KRAS_TO_IRK;
+      // Считаем, на сколько км сдвинулись с прошлого запроса
+      const deltaKm = haversine(lastLat, lastLon, lat, lon) / 1000;
+      
+      // Если сдвиг адекватный (не глюк GPS), вычитаем из текущего расстояния
+      if (deltaKm < 50 && deltaKm > 0.01) {
+        currentDistToIrk -= deltaKm;
+        currentDistToVlad -= deltaKm;
+        
+        // Обновляем последнюю точку
+        lastLat = lat;
+        lastLon = lon;
+      }
     }
 
-    // Расстояние до Владивостока (считаем так же пропорционально)
-    const straightToVlad = haversine(lat, lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon) / 1000;
-    const straightKrasToVlad = haversine(KRASNOYARSK.lat, KRASNOYARSK.lon, VLADIVOSTOK.lat, VLADIVOSTOK.lon) / 1000;
-    
-    let fractionToVlad = 1 - (straightToVlad / straightKrasToVlad);
-    fractionToVlad = Math.max(0, Math.min(1, fractionToVlad));
-    let distVlad = ROAD_KRAS_TO_VLAD * (1 - fractionToVlad);
-    if (distVlad > ROAD_KRAS_TO_VLAD) distVlad = ROAD_KRAS_TO_VLAD;
+    // Защита от отрицательных значений
+    if (currentDistToIrk < 0) currentDistToIrk = 0;
+    if (currentDistToVlad < 0) currentDistToVlad = 0;
 
-    // Считаем время до Иркутска
-    const timeToNextHours = distNext / calcSpeed;
+    // Расчет времени до Иркутска
+    const timeToNextHours = currentDistToIrk / calcSpeed;
     const timeString = formatTime(timeToNextHours);
 
-    const displayNext = distNext < 10 ? distNext.toFixed(1) : Math.round(distNext);
-    const displayVlad = Math.round(distVlad);
+    const displayNext = currentDistToIrk < 10 ? currentDistToIrk.toFixed(1) : Math.round(currentDistToIrk);
+    const displayVlad = Math.round(currentDistToVlad);
     
-    // Вывод: До Иркутска: 885 км (в пути ~11 ч. 30 мин.) | До Владивостока: 4660 км
     res.end(`До Иркутска: ${displayNext} км (в пути ~${timeString}) | До Владивостока: ${displayVlad} км`);
     
   } catch (e) {
