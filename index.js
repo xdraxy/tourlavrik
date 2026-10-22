@@ -35,39 +35,37 @@ function haversine(lat1, lon1, lat2, lon2) {
 
 function getNextCityInfo(lat, lon) {
   const n = CITIES.length;
-  let bestSegIdx = 0;
-  let bestFraction = 0;
-  let bestScore = Infinity;
+  
+  // 1. Ищем ближайший город к текущей точке
+  let nearestIdx = 0;
+  let minDist = Infinity;
 
-  for (let i = 0; i < n - 1; i++) {
-    const a = CITIES[i], b = CITIES[i + 1];
-    const distToA = haversine(lat, lon, a.lat, a.lon);
-    const distToB = haversine(lat, lon, b.lat, b.lon);
-    const segLen  = haversine(a.lat, a.lon, b.lat, b.lon);
-    
-    const score = (distToA + distToB) - segLen;
-
-    if (score < bestScore) {
-      bestScore = score;
-      bestSegIdx = i;
-      const denom = distToA + distToB;
-      bestFraction = denom > 0 ? distToA / denom : 0;
+  for (let i = 0; i < n; i++) {
+    const d = haversine(lat, lon, CITIES[i].lat, CITIES[i].lon);
+    if (d < minDist) {
+      minDist = d;
+      nearestIdx = i;
     }
   }
 
-  // ИСПРАВЛЕНИЕ ЗДЕСЬ:
-  // Если до левого города (А) меньше 25 км или мы проехали больше 10% пути, 
-  // значит, мы уже в городе А или выехали из него.
-  const distToA = haversine(lat, lon, CITIES[bestSegIdx].lat, CITIES[bestSegIdx].lon);
-  let passedIdx = (distToA < 25000 || bestFraction > 0.10) ? bestSegIdx : bestSegIdx - 1;
+  // 2. Определяем индекс города, от которого считаем
+  // Если мы ближе 35 км к городу, значит мы в нём (или на подъезде). 
+  // Берем этот город как отправную точку для поиска следующего.
+  let fromIdx = nearestIdx;
+  
+  // Если мы стоим в самом городе (меньше 35 км), то следующий — это +1
+  // Если мы уже далеко от него (в пути), то ближайший город — это следующий.
+  if (minDist > 35000) {
+     fromIdx = Math.max(0, nearestIdx - 1); 
+  }
 
-  const nextIdx = Math.min(n - 1, passedIdx + 1);
+  const nextIdx = Math.min(n - 1, fromIdx + 1);
   const nextCity = CITIES[nextIdx];
 
-  const roadTotal = ROAD_TO_NEXT[passedIdx] || 0;
-  const straightTotal = haversine(CITIES[passedIdx].lat, CITIES[passedIdx].lon,
-                                   nextCity.lat, nextCity.lon);
-  const straightDone = haversine(CITIES[passedIdx].lat, CITIES[passedIdx].lon, lat, lon);
+  // 3. Считаем километры по дороге
+  const roadTotal = ROAD_TO_NEXT[fromIdx] || 0;
+  const straightTotal = haversine(CITIES[fromIdx].lat, CITIES[fromIdx].lon, nextCity.lat, nextCity.lon);
+  const straightDone = haversine(CITIES[fromIdx].lat, CITIES[fromIdx].lon, lat, lon);
   
   let fraction = straightTotal > 0 ? straightDone / straightTotal : 0;
   fraction = Math.max(0, Math.min(1, fraction));
@@ -86,7 +84,12 @@ function fetchLocation() {
         try {
           const json = JSON.parse(data);
           if (!json || !json.location) return reject(new Error('no location'));
-          resolve({ lat: json.location.latitude, lon: json.location.longitude });
+          
+          // Проверяем, насколько свежие данные (опционально)
+          const ts = json.updatedAt || Date.now();
+          const ageMins = Math.round((Date.now() - ts) / 60000);
+          
+          resolve({ lat: json.location.latitude, lon: json.location.longitude, ageMins });
         } catch (e) { reject(e); }
       });
     }).on('error', reject);
@@ -94,15 +97,22 @@ function fetchLocation() {
 }
 
 const server = http.createServer(async (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  
   try {
-    const { lat, lon } = await fetchLocation();
+    const { lat, lon, ageMins } = await fetchLocation();
     const { nextCity, distKm } = getNextCityInfo(lat, lon);
+    
     const display = distKm < 10 ? distKm.toFixed(1) : Math.round(distKm);
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(`До ${nextCity} осталось ${display} км`);
+    
+    // Выводим город и расстояние. 
+    // Если данные старые, можно добавить приписку (но для Nightbot лучше просто текст)
+    let text = `До ${nextCity} осталось ${display} км`;
+    if (ageMins > 5) text += ` (GPS обновлен ${ageMins} мин. назад)`;
+    
+    res.end(text);
   } catch (e) {
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Не удалось определить местоположение');
+    res.end('Не удалось определить местоположение (ошибка GPS)');
   }
 });
 
