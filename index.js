@@ -58,52 +58,51 @@ const server = http.createServer(async (req, res) => {
   try {
     const { lat, lon } = await fetchLocation();
     
-    let currentCityIdx = 0;
-    let minDistance = Infinity;
+    let bestSegmentIdx = 0;
+    let bestFraction = 0;
+    let minScore = Infinity;
 
-    // 1. Ищем ближайший город
-    for (let i = 0; i < CITIES.length; i++) {
-      const d = haversine(lat, lon, CITIES[i].lat, CITIES[i].lon) / 1000;
-      if (d < minDistance) {
-        minDistance = d;
-        currentCityIdx = i;
+    // 1. Ищем отрезок между двумя городами, на котором мы сейчас находимся
+    for (let i = 0; i < CITIES.length - 1; i++) {
+      const a = CITIES[i];
+      const b = CITIES[i + 1];
+      
+      const distToA = haversine(lat, lon, a.lat, a.lon) / 1000;
+      const distToB = haversine(lat, lon, b.lat, b.lon) / 1000;
+      const segLen = haversine(a.lat, a.lon, b.lat, b.lon) / 1000;
+      
+      // Чем ближе сумма расстояний к длине отрезка, тем точнее мы на нем
+      const score = (distToA + distToB) - segLen;
+      
+      if (score < minScore) {
+        minScore = score;
+        bestSegmentIdx = i;
+        const denom = distToA + distToB;
+        bestFraction = denom > 0 ? distToA / denom : 0;
       }
     }
 
-    // 2. Определяем, куда мы едем
-    // Если мы в радиусе 100 км от города, считаем, что мы всё еще "в нём" (или только выехали).
-    // Если мы дальше 100 км, значит мы уже на трассе.
+    // 2. Определяем, проехали ли мы город B (начало следующего отрезка)
+    // Если мы проехали больше 90% отрезка, считаем, что мы уже почти в следующем городе
+    let passedIdx = bestSegmentIdx;
     
-    let fromIdx = currentCityIdx;
+    // Если мы проехали больше половины отрезка, мы всё еще едем к bestSegmentIdx + 1
+    // Но чтобы не перескакивать через Читу, мы жестко привязываемся к bestSegmentIdx
     
-    if (minDistance > 100) {
-      // Если мы на трассе, ближайший город - это цель, а выехали мы из предыдущего.
-      fromIdx = Math.max(0, currentCityIdx - 1);
-    }
+    // Защита от выхода за пределы
+    if (passedIdx >= CITIES.length - 1) passedIdx = CITIES.length - 2;
+    
+    const lastCity = CITIES[passedIdx];
+    const nextCity = CITIES[passedIdx + 1];
+    const roadTotal = ROAD_DISTANCES[passedIdx];
 
-    // Если мы находимся ровно в Улан-Удэ, minDistance будет меньше 100, 
-    // значит fromIdx останется Улан-Удэ. И мы поедем в Читу.
-    
-    // Защита от выхода за пределы списка
-    if (fromIdx >= CITIES.length - 1) fromIdx = CITIES.length - 2;
-    
-    const lastCity = CITIES[fromIdx];
-    const nextCity = CITIES[fromIdx + 1];
-    const roadTotal = ROAD_DISTANCES[fromIdx];
-
-    // 3. Считаем пройденное расстояние от lastCity
-    const straightTotal = haversine(lastCity.lat, lastCity.lon, nextCity.lat, nextCity.lon);
-    const straightDone = haversine(lastCity.lat, lastCity.lon, lat, lon);
-    
-    let fraction = straightTotal > 0 ? straightDone / straightTotal : 0;
-    fraction = Math.max(0, Math.min(1, fraction));
-    
-    let distToNext = roadTotal * (1 - fraction);
+    // 3. Считаем оставшееся расстояние по дороге
+    let distToNext = roadTotal * (1 - bestFraction);
     if (distToNext < 0) distToNext = 0;
 
     const displayDist = distToNext < 10 ? distToNext.toFixed(1) : Math.round(distToNext);
 
-    // 4. Формируем сообщение
+    // 4. Выводим результат
     res.end(`Мы выехали с ${lastCity.name}, до ${nextCity.nextName} осталось ${displayDist} км`);
     
   } catch (e) {
