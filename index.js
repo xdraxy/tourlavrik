@@ -58,52 +58,56 @@ const server = http.createServer(async (req, res) => {
   try {
     const { lat, lon } = await fetchLocation();
     
-    let bestSegmentIdx = 0;
-    let bestFraction = 0;
-    let minScore = Infinity;
-
-    // 1. Ищем отрезок между двумя городами, на котором мы сейчас находимся
-    for (let i = 0; i < CITIES.length - 1; i++) {
-      const a = CITIES[i];
-      const b = CITIES[i + 1];
-      
-      const distToA = haversine(lat, lon, a.lat, a.lon) / 1000;
-      const distToB = haversine(lat, lon, b.lat, b.lon) / 1000;
-      const segLen = haversine(a.lat, a.lon, b.lat, b.lon) / 1000;
-      
-      // Чем ближе сумма расстояний к длине отрезка, тем точнее мы на нем
-      const score = (distToA + distToB) - segLen;
-      
-      if (score < minScore) {
-        minScore = score;
-        bestSegmentIdx = i;
-        const denom = distToA + distToB;
-        bestFraction = denom > 0 ? distToA / denom : 0;
+    // 1. Считаем расстояния до всех городов
+    let distances = CITIES.map(c => haversine(lat, lon, c.lat, c.lon) / 1000);
+    
+    // 2. Находим два ближайших города (это гарантирует, что мы на нужном отрезке)
+    let min1Idx = 0, min1Dist = Infinity;
+    for (let i = 0; i < distances.length; i++) {
+      if (distances[i] < min1Dist) {
+        min1Dist = distances[i];
+        min1Idx = i;
       }
     }
+    
+    // 3. Определяем направление и текущий отрезок
+    let fromIdx = 0;
+    
+    // Если мы находимся близко к Чите (индекс 11), но до Благовещенска (12) по прямой меньше, 
+    // скрипт может сойти с ума. Жестко фиксируем направление.
+    if (min1Idx >= 11) {
+       // Если до Читы по прямой осталось больше 150 км, мы всё ещё едем к Чите
+       if (distances[11] > 150) {
+           fromIdx = 10; // Улан-Удэ -> Чита
+       } else {
+           fromIdx = 11; // Чита -> Благовещенск
+       }
+    } else {
+       // Для остальных городов работают стандартные правила
+       fromIdx = min1Idx;
+    }
 
-    // 2. Определяем, проехали ли мы город B (начало следующего отрезка)
-    // Если мы проехали больше 90% отрезка, считаем, что мы уже почти в следующем городе
-    let passedIdx = bestSegmentIdx;
+    // Защита от выхода за пределы массива
+    if (fromIdx >= CITIES.length - 1) fromIdx = CITIES.length - 2;
     
-    // Если мы проехали больше половины отрезка, мы всё еще едем к bestSegmentIdx + 1
-    // Но чтобы не перескакивать через Читу, мы жестко привязываемся к bestSegmentIdx
-    
-    // Защита от выхода за пределы
-    if (passedIdx >= CITIES.length - 1) passedIdx = CITIES.length - 2;
-    
-    const lastCity = CITIES[passedIdx];
-    const nextCity = CITIES[passedIdx + 1];
-    const roadTotal = ROAD_DISTANCES[passedIdx];
+    const lastCity = CITIES[fromIdx];
+    const nextCity = CITIES[fromIdx + 1];
+    const roadTotal = ROAD_DISTANCES[fromIdx];
 
-    // 3. Считаем оставшееся расстояние по дороге
-    let distToNext = roadTotal * (1 - bestFraction);
+    // 4. Считаем оставшееся расстояние по дороге
+    const straightTotal = haversine(lastCity.lat, lastCity.lon, nextCity.lat, nextCity.lon) / 1000;
+    const straightDone = haversine(lastCity.lat, lastCity.lon, lat, lon) / 1000;
+    
+    let fraction = straightTotal > 0 ? straightDone / straightTotal : 0;
+    fraction = Math.max(0, Math.min(1, fraction));
+    
+    let distToNext = roadTotal * (1 - fraction);
     if (distToNext < 0) distToNext = 0;
 
     const displayDist = distToNext < 10 ? distToNext.toFixed(1) : Math.round(distToNext);
 
-    // 4. Выводим результат
-    res.end(`Мы выехали с ${lastCity.name}, до ${nextCity.nextName} осталось ${displayDist} км`);
+    // 5. Формируем сообщение
+    res.end(`мы находимся (выехали) с ${lastCity.name}, до ${nextCity.nextName} осталось ${displayDist} км`);
     
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
