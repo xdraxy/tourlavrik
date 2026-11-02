@@ -2,7 +2,8 @@ const http = require('http');
 const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
-const POLL_INTERVAL_MS = 10 * 1000; // опрашиваем rtirl каждые 10 секунд
+const POLL_INTERVAL_MS = 5 * 1000;   // сервер опрашивает rtirl каждые 5 сек
+const CLIENT_REFRESH_MS = 3 * 1000;  // клиент перезапрашивает текст каждые 3 сек
 
 // Координаты городов
 const CITIES = {
@@ -23,11 +24,10 @@ const LEGS = [
   { from: 'KHAB',     to: 'VLAD',     km: 770  }
 ];
 
-// Последнее известное состояние
 const state = {
   lat: null,
   lon: null,
-  updatedAt: null,   // когда последний раз успешно обновились
+  updatedAt: null,
   lastError: null,
   lastRawResponse: null
 };
@@ -46,7 +46,6 @@ function distKm(lat1, lon1, lat2, lon2) {
   return haversine(lat1, lon1, lat2, lon2) / 1000;
 }
 
-// Запрос к rtirl.com по pull key
 function fetchLocation() {
   return new Promise((resolve, reject) => {
     const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}&r=${Math.random()}`;
@@ -68,15 +67,14 @@ function fetchLocation() {
           if (!json || !json.location) return reject(new Error('no location in response'));
           resolve({ lat: json.location.latitude, lon: json.location.longitude });
         } catch (e) {
-          reject(new Error('parse error: ' + e.message + ' | raw: ' + data.slice(0, 200)));
+          reject(new Error('parse error: ' + e.message));
         }
       });
     }).on('error', reject);
   });
 }
 
-// Фоновый опрос
-async function pollLoop() {
+async function pollOnce() {
   try {
     const { lat, lon } = await fetchLocation();
     state.lat = lat;
@@ -88,10 +86,13 @@ async function pollLoop() {
     state.lastError = e.message;
     console.error(`[poll ${new Date().toISOString()}] error: ${e.message}`);
   }
+}
+
+async function pollLoop() {
+  await pollOnce();
   setTimeout(pollLoop, POLL_INTERVAL_MS);
 }
 
-// Расчёт сообщения по текущему состоянию
 function buildMessage() {
   if (state.lat == null || state.lon == null) {
     return 'Ожидание данных GPS...';
@@ -135,10 +136,41 @@ function buildMessage() {
   return `Мы находимся (выехали) с ${A.name}, до ${B.name} осталось ${display} км`;
 }
 
+// HTML-страница, которая сама тянет /text каждые 3 сек
+function renderHtml() {
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Маршрут</title>
+<style>
+  body { margin:0; background:transparent; font-family: Arial, sans-serif; }
+  #msg { font-size: 32px; color: #fff; text-shadow: 0 0 4px #000; padding: 8px; }
+</style>
+</head>
+<body>
+<div id="msg">Загрузка...</div>
+<script>
+  const el = document.getElementById('msg');
+  async function refresh() {
+    try {
+      const r = await fetch('/text?t=' + Date.now(), { cache: 'no-store' });
+      el.textContent = await r.text();
+    } catch (e) {
+      el.textContent = 'Ошибка соединения';
+    }
+  }
+  refresh();
+  setInterval(refresh, ${CLIENT_REFRESH_MS});
+</script>
+</body>
+</html>`;
+}
+
 const server = http.createServer(async (req, res) => {
-  // Ручное обновление: /?refresh=1 — сразу дёргает rtirl и возвращает свежее
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  // Отладка
   if (url.pathname === '/debug') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({
@@ -153,29 +185,41 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (url.searchParams.get('refresh') === '1') {
-    try {
-      const { lat, lon } = await fetchLocation();
-      state.lat = lat;
-      state.lon = lon;
-      state.updatedAt = Date.now();
-      state.lastError = null;
-    } catch (e) {
-      state.lastError = e.message;
-    }
+  // Только текст — клиент дёргает это каждые 3 сек
+  if (url.pathname === '/text') {
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    res.end(buildMessage());
+    return;
   }
 
+  // Принудительное обновление из rtirl
+  if (url.pathname === '/refresh') {
+    await pollOnce();
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0'
+    });
+    res.end(buildMessage());
+    return;
+  }
+
+  // Главная — HTML с автообновлением
   res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
     'Pragma': 'no-cache',
     'Expires': '0'
   });
-  res.end(buildMessage());
+  res.end(renderHtml());
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Listening on ${PORT}`);
-  pollLoop(); // запускаем фоновый опрос rtirl.com
+  pollLoop();
 });
