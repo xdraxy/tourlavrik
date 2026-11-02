@@ -13,11 +13,11 @@ const CITIES = {
   VLAD:      { lat: 43.1155, lon: 131.8855, name: 'Владивостока', nextName: 'ФИНИШ' }
 };
 
-// Участки маршрута: от города A до города B и расстояние по трассе
+// Участки маршрута
 const LEGS = [
   { from: 'IRKUTSK',  to: 'ULAN_UDE', km: 460  },
   { from: 'ULAN_UDE', to: 'CHITA',    km: 670  },
-  { from: 'CHITA',    to: 'BLAG',     km: 860  }, // было 1150 — уменьшено до реальных ~860
+  { from: 'CHITA',    to: 'BLAG',     km: 860  },
   { from: 'BLAG',     to: 'KHAB',     km: 720  },
   { from: 'KHAB',     to: 'VLAD',     km: 770  }
 ];
@@ -38,8 +38,17 @@ function distKm(lat1, lon1, lat2, lon2) {
 
 function fetchLocation() {
   return new Promise((resolve, reject) => {
-    const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}`;
-    https.get(url, (res) => {
+    // Добавляем случайный параметр r, чтобы ни сервер, ни промежуточные прокси не кэшировали
+    const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}&r=${Math.random()}`;
+    const opts = {
+      headers: {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'User-Agent': 'Mozilla/5.0 (compatible; RouteTracker/1.0)'
+      }
+    };
+    https.get(url, opts, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
@@ -54,12 +63,17 @@ function fetchLocation() {
 }
 
 const server = http.createServer(async (req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  // Заголовки, запрещающие кэширование ответа
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
 
   try {
     const { lat, lon } = await fetchLocation();
 
-    // Определяем, на каком участке маршрута мы находимся
     let bestLeg = null;
     let bestScore = Infinity;
     let bestFraction = 0;
@@ -68,17 +82,15 @@ const server = http.createServer(async (req, res) => {
       const A = CITIES[leg.from];
       const B = CITIES[leg.to];
 
-      const dAP = distKm(lat, lon, A.lat, A.lon); // до начала участка
-      const dBP = distKm(lat, lon, B.lat, B.lon); // до конца участка
-      const dAB = distKm(A.lat, A.lon, B.lat, B.lon); // длина участка по прямой
+      const dAP = distKm(lat, lon, A.lat, A.lon);
+      const dBP = distKm(lat, lon, B.lat, B.lon);
+      const dAB = distKm(A.lat, A.lon, B.lat, B.lon);
 
-      // Пройденная доля участка (0 — в начале, 1 — в конце)
       let fraction = (dAP + dBP - dAB) > 0
         ? (dAP + dBP - dAB) / (2 * dAB)
         : 0;
       fraction = Math.max(0, Math.min(1, fraction));
 
-      // "Штраф" за нахождение вне участка
       const score = dAP + dBP - dAB;
 
       if (score < bestScore) {
@@ -91,7 +103,6 @@ const server = http.createServer(async (req, res) => {
     const A = CITIES[bestLeg.from];
     const B = CITIES[bestLeg.to];
 
-    // Оставшееся расстояние по трассе до конца участка
     let remaining = bestLeg.km * (1 - bestFraction);
     if (remaining < 0) remaining = 0;
     if (remaining > bestLeg.km) remaining = bestLeg.km;
