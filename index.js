@@ -2,7 +2,6 @@ const http = require('http');
 const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
-const POLL_MS = 5000;
 
 const CITIES = {
   IRKUTSK:  { lat: 52.2870, lon: 104.3050, name: 'Иркутска' },
@@ -21,7 +20,7 @@ const LEGS = [
   { from: 'KHAB',     to: 'VLAD',     km: 770  }
 ];
 
-let state = { lat: null, lon: null, updatedAt: 0, lastError: null, lastRaw: null };
+const state = { lat: null, lon: null, updatedAt: 0, lastError: null, lastRaw: null };
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -32,43 +31,50 @@ function haversine(lat1, lon1, lat2, lon2) {
 }
 const distKm = (a,b,c,d) => haversine(a,b,c,d)/1000;
 
+// Всегда заново тянем rtirl, никогда не берём из кэша
 function fetchLocation() {
   return new Promise((resolve, reject) => {
     const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}&r=${Math.random()}`;
-    https.get(url, { headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } }, (res) => {
+    const req = https.get(url, {
+      headers: {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'User-Agent': 'Mozilla/5.0 (RouteTracker)'
+      },
+      timeout: 5000
+    }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
         state.lastRaw = data;
         try {
           const j = JSON.parse(data);
-          if (!j || !j.location) return reject(new Error('no location'));
-          resolve({ lat: j.location.latitude, lon: j.location.longitude });
-        } catch (e) { reject(e); }
+          if (!j || !j.location || j.location.latitude == null || j.location.longitude == null) {
+            return reject(new Error('no location in response'));
+          }
+          state.lat = j.location.latitude;
+          state.lon = j.location.longitude;
+          state.updatedAt = Date.now();
+          state.lastError = null;
+          resolve({ lat: state.lat, lon: state.lon });
+        } catch (e) {
+          state.lastError = 'parse: ' + e.message;
+          reject(e);
+        }
       });
-    }).on('error', reject);
+    });
+    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+    req.on('error', (e) => { state.lastError = e.message; reject(e); });
   });
 }
 
-async function poll() {
-  try {
-    const { lat, lon } = await fetchLocation();
-    state.lat = lat; state.lon = lon; state.updatedAt = Date.now(); state.lastError = null;
-    console.log(`[poll] lat=${lat} lon=${lon}`);
-  } catch (e) {
-    state.lastError = e.message;
-    console.error(`[poll] ${e.message}`);
-  }
-  setTimeout(poll, POLL_MS);
-}
-
-function buildMessage() {
-  if (state.lat == null) return 'GPS error';
+function buildMessage(lat, lon) {
   let bestLeg = null, bestScore = Infinity, bestFraction = 0;
   for (const leg of LEGS) {
     const A = CITIES[leg.from], B = CITIES[leg.to];
-    const dAP = distKm(state.lat, state.lon, A.lat, A.lon);
-    const dBP = distKm(state.lat, state.lon, B.lat, B.lon);
+    const dAP = distKm(lat, lon, A.lat, A.lon);
+    const dBP = distKm(lat, lon, B.lat, B.lon);
     const dAB = distKm(A.lat, A.lon, B.lat, B.lon);
     let fraction = (dAP + dBP - dAB) > 0 ? (dAP + dBP - dAB) / (2 * dAB) : 0;
     fraction = Math.max(0, Math.min(1, fraction));
@@ -84,24 +90,48 @@ function buildMessage() {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
   if (url.pathname === '/debug') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({
       lat: state.lat, lon: state.lon,
-      ageSeconds: state.updatedAt ? Math.round((Date.now()-state.updatedAt)/1000) : null,
-      lastError: state.lastError, lastRaw: state.lastRaw, message: buildMessage()
+      updatedAt: state.updatedAt ? new Date(state.updatedAt).toISOString() : null,
+      ageSeconds: state.updatedAt ? Math.round((Date.now() - state.updatedAt)/1000) : null,
+      lastError: state.lastError,
+      lastRaw: state.lastRaw,
+      message: state.lat != null ? buildMessage(state.lat, state.lon) : null
     }, null, 2));
     return;
   }
-  // Всё остальное — ЧИСТЫЙ ТЕКСТ (без HTML), именно это читает Nightbot
-  res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
-    'Pragma': 'no-cache',
-    'Expires': '0'
-  });
-  res.end(buildMessage());
+
+  // Главное: при КАЖДОМ запросе синхронно тянем rtirl и считаем свежее значение
+  try {
+    const { lat, lon } = await fetchLocation();
+    const text = buildMessage(lat, lon);
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    res.end(text);
+  } catch (e) {
+    // Если rtirl не ответил — отдаём последнее известное, чтобы Nightbot не падал
+    if (state.lat != null) {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      });
+      res.end(buildMessage(state.lat, state.lon));
+    } else {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
+      });
+      res.end('GPS error');
+    }
+  }
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => { console.log('Listening on ' + PORT); poll(); });
+server.listen(PORT, () => console.log('Listening on ' + PORT));
