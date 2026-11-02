@@ -17,7 +17,7 @@ const CITIES = {
 const LEGS = [
   { from: 'IRKUTSK',  to: 'ULAN_UDE', km: 460  },
   { from: 'ULAN_UDE', to: 'CHITA',    km: 670  },
-  { from: 'CHITA',    to: 'BLAG',     km: 1150 },
+  { from: 'CHITA',    to: 'BLAG',     km: 860  }, // было 1150 — уменьшено до реальных ~860
   { from: 'BLAG',     to: 'KHAB',     km: 720  },
   { from: 'KHAB',     to: 'VLAD',     km: 770  }
 ];
@@ -59,10 +59,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const { lat, lon } = await fetchLocation();
 
-    // Определяем, на каком участке маршрута мы находимся:
-    // для каждого участка считаем "эллиптический" критерий —
-    // насколько сумма расстояний до концов больше расстояния между концами.
-    // Минимум этой величины = наиболее вероятный текущий участок.
+    // Определяем, на каком участке маршрута мы находимся
     let bestLeg = null;
     let bestScore = Infinity;
     let bestFraction = 0;
@@ -79,11 +76,9 @@ const server = http.createServer(async (req, res) => {
       let fraction = (dAP + dBP - dAB) > 0
         ? (dAP + dBP - dAB) / (2 * dAB)
         : 0;
-      // Ограничиваем и уточняем через проекцию
       fraction = Math.max(0, Math.min(1, fraction));
 
-      // "Штраф" за нахождение вне участка: насколько точка удалена от прямой A-B
-      // (используем разность между суммой расстояний и длиной участка)
+      // "Штраф" за нахождение вне участка
       const score = dAP + dBP - dAB;
 
       if (score < bestScore) {
