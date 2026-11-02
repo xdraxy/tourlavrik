@@ -13,14 +13,12 @@ const CITIES = {
 };
 
 const LEGS = [
-  { from: 'IRKUTSK',  to: 'ULAN_UDE', km: 460  },
-  { from: 'ULAN_UDE', to: 'CHITA',    km: 670  },
-  { from: 'CHITA',    to: 'BLAG',     km: 860  },
-  { from: 'BLAG',     to: 'KHAB',     km: 720  },
-  { from: 'KHAB',     to: 'VLAD',     km: 770  }
+  { from: 'IRKUTSK',  to: 'ULAN_UDE', km: 460 },
+  { from: 'ULAN_UDE', to: 'CHITA',    km: 670 },
+  { from: 'CHITA',    to: 'BLAG',     km: 860 },
+  { from: 'BLAG',     to: 'KHAB',     km: 720 },
+  { from: 'KHAB',     to: 'VLAD',     km: 770 }
 ];
-
-const state = { lat: null, lon: null, updatedAt: 0, lastError: null, lastRaw: null };
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -31,41 +29,30 @@ function haversine(lat1, lon1, lat2, lon2) {
 }
 const distKm = (a,b,c,d) => haversine(a,b,c,d)/1000;
 
-// Всегда заново тянем rtirl, никогда не берём из кэша
+// Каждый вызов — свежий запрос к rtirl, никакого state
 function fetchLocation() {
   return new Promise((resolve, reject) => {
     const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}&r=${Math.random()}`;
     const req = https.get(url, {
       headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
         'Pragma': 'no-cache',
         'Expires': '0',
         'User-Agent': 'Mozilla/5.0 (RouteTracker)'
       },
-      timeout: 5000
+      timeout: 6000
     }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        state.lastRaw = data;
-        try {
-          const j = JSON.parse(data);
-          if (!j || !j.location || j.location.latitude == null || j.location.longitude == null) {
-            return reject(new Error('no location in response'));
-          }
-          state.lat = j.location.latitude;
-          state.lon = j.location.longitude;
-          state.updatedAt = Date.now();
-          state.lastError = null;
-          resolve({ lat: state.lat, lon: state.lon });
-        } catch (e) {
-          state.lastError = 'parse: ' + e.message;
-          reject(e);
-        }
+        let j;
+        try { j = JSON.parse(data); } catch (e) { return reject(new Error('parse: ' + data.slice(0,100))); }
+        if (!j || !j.location || j.location.latitude == null) return reject(new Error('no location: ' + data.slice(0,100)));
+        resolve({ lat: j.location.latitude, lon: j.location.longitude, raw: data });
       });
     });
-    req.on('timeout', () => { req.destroy(new Error('timeout')); });
-    req.on('error', (e) => { state.lastError = e.message; reject(e); });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
   });
 }
 
@@ -92,44 +79,37 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   if (url.pathname === '/debug') {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({
-      lat: state.lat, lon: state.lon,
-      updatedAt: state.updatedAt ? new Date(state.updatedAt).toISOString() : null,
-      ageSeconds: state.updatedAt ? Math.round((Date.now() - state.updatedAt)/1000) : null,
-      lastError: state.lastError,
-      lastRaw: state.lastRaw,
-      message: state.lat != null ? buildMessage(state.lat, state.lon) : null
-    }, null, 2));
+    try {
+      const { lat, lon, raw } = await fetchLocation();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        now: new Date().toISOString(),
+        lat, lon,
+        raw: raw.slice(0, 300),
+        message: buildMessage(lat, lon)
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ now: new Date().toISOString(), error: e.message }, null, 2));
+    }
     return;
   }
 
-  // Главное: при КАЖДОМ запросе синхронно тянем rtirl и считаем свежее значение
   try {
     const { lat, lon } = await fetchLocation();
-    const text = buildMessage(lat, lon);
     res.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
       'Pragma': 'no-cache',
       'Expires': '0'
     });
-    res.end(text);
+    res.end(buildMessage(lat, lon));
   } catch (e) {
-    // Если rtirl не ответил — отдаём последнее известное, чтобы Nightbot не падал
-    if (state.lat != null) {
-      res.writeHead(200, {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      });
-      res.end(buildMessage(state.lat, state.lon));
-    } else {
-      res.writeHead(200, {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Cache-Control': 'no-cache, no-store, must-revalidate'
-      });
-      res.end('GPS error');
-    }
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
+    });
+    res.end('GPS error');
   }
 });
 
