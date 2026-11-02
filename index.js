@@ -13,14 +13,14 @@ const CITIES = {
   VLAD:      { lat: 43.1155, lon: 131.8855, name: 'Владивостока', nextName: 'ФИНИШ' }
 };
 
-// Расстояния по трассе (км) между этими городами
-const DISTANCES = {
-  IRKUTSK_ULAN:  460,  // Иркутск - Улан-Удэ
-  ULAN_CHITA:    670,  // Улан-Удэ - Чита (по твоим данным)
-  CHITA_BLAG:    1150, // Чита - Благовещенск (по твоим данным)
-  BLAG_KHAB:     720,  // Благовещенск - Хабаровск
-  KHAB_VLAD:     770   // Хабаровск - Владивосток
-};
+// Участки маршрута: от города A до города B и расстояние по трассе
+const LEGS = [
+  { from: 'IRKUTSK',  to: 'ULAN_UDE', km: 460  },
+  { from: 'ULAN_UDE', to: 'CHITA',    km: 670  },
+  { from: 'CHITA',    to: 'BLAG',     km: 1150 },
+  { from: 'BLAG',     to: 'KHAB',     km: 720  },
+  { from: 'KHAB',     to: 'VLAD',     km: 770  }
+];
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -30,6 +30,10 @@ function haversine(lat1, lon1, lat2, lon2) {
             Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
             Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function distKm(lat1, lon1, lat2, lon2) {
+  return haversine(lat1, lon1, lat2, lon2) / 1000;
 }
 
 function fetchLocation() {
@@ -51,46 +55,57 @@ function fetchLocation() {
 
 const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-  
+
   try {
     const { lat, lon } = await fetchLocation();
-    
-    let message = "";
 
-    // Проверяем расстояние по прямой до Читы
-    const distToChita = haversine(lat, lon, CITIES.CHITA.lat, CITIES.CHITA.lon) / 1000;
-    
-    // Если до Читы по прямой меньше 40 км (значит мы уже практически в ней)
-    if (distToChita < 40) {
-      // Едем от Читы до Благовещенска
-      const straightTotal = haversine(CITIES.CHITA.lat, CITIES.CHITA.lon, CITIES.BLAG.lat, CITIES.BLAG.lon) / 1000;
-      const straightDone = haversine(lat, lon, CITIES.BLAG.lat, CITIES.BLAG.lon) / 1000;
-      let fraction = 1 - (straightDone / straightTotal);
+    // Определяем, на каком участке маршрута мы находимся:
+    // для каждого участка считаем "эллиптический" критерий —
+    // насколько сумма расстояний до концов больше расстояния между концами.
+    // Минимум этой величины = наиболее вероятный текущий участок.
+    let bestLeg = null;
+    let bestScore = Infinity;
+    let bestFraction = 0;
+
+    for (const leg of LEGS) {
+      const A = CITIES[leg.from];
+      const B = CITIES[leg.to];
+
+      const dAP = distKm(lat, lon, A.lat, A.lon); // до начала участка
+      const dBP = distKm(lat, lon, B.lat, B.lon); // до конца участка
+      const dAB = distKm(A.lat, A.lon, B.lat, B.lon); // длина участка по прямой
+
+      // Пройденная доля участка (0 — в начале, 1 — в конце)
+      let fraction = (dAP + dBP - dAB) > 0
+        ? (dAP + dBP - dAB) / (2 * dAB)
+        : 0;
+      // Ограничиваем и уточняем через проекцию
       fraction = Math.max(0, Math.min(1, fraction));
-      
-      let dist = DISTANCES.CHITA_BLAG * (1 - fraction);
-      if (dist > DISTANCES.CHITA_BLAG) dist = DISTANCES.CHITA_BLAG;
-      
-      const display = dist < 10 ? dist.toFixed(1) : Math.round(dist);
-      message = `Мы находимся (выехали) с ${CITIES.CHITA.name}, до ${CITIES.CHITA.nextName} осталось ${display} км`;
-      
-    } else {
-      // Мы на пути от Улан-Удэ к Чите
-      const straightTotal = haversine(CITIES.ULAN_UDE.lat, CITIES.ULAN_UDE.lon, CITIES.CHITA.lat, CITIES.CHITA.lon) / 1000;
-      const straightDone = haversine(lat, lon, CITIES.CHITA.lat, CITIES.CHITA.lon) / 1000;
-      
-      let fraction = 1 - (straightDone / straightTotal);
-      fraction = Math.max(0, Math.min(1, fraction));
-      
-      let dist = DISTANCES.ULAN_CHITA * (1 - fraction);
-      if (dist > DISTANCES.ULAN_CHITA) dist = DISTANCES.ULAN_CHITA;
-      
-      const display = dist < 10 ? dist.toFixed(1) : Math.round(dist);
-      message = `Мы находимся (выехали) с ${CITIES.ULAN_UDE.name}, до ${CITIES.ULAN_UDE.nextName} осталось ${display} км`;
+
+      // "Штраф" за нахождение вне участка: насколько точка удалена от прямой A-B
+      // (используем разность между суммой расстояний и длиной участка)
+      const score = dAP + dBP - dAB;
+
+      if (score < bestScore) {
+        bestScore = score;
+        bestLeg = leg;
+        bestFraction = fraction;
+      }
     }
 
+    const A = CITIES[bestLeg.from];
+    const B = CITIES[bestLeg.to];
+
+    // Оставшееся расстояние по трассе до конца участка
+    let remaining = bestLeg.km * (1 - bestFraction);
+    if (remaining < 0) remaining = 0;
+    if (remaining > bestLeg.km) remaining = bestLeg.km;
+
+    const display = remaining < 10 ? remaining.toFixed(1) : Math.round(remaining);
+    const message = `Мы находимся (выехали) с ${A.name}, до ${B.name} осталось ${display} км`;
+
     res.end(message);
-    
+
   } catch (e) {
     res.end('Не удалось определить местоположение (ошибка GPS)');
   }
