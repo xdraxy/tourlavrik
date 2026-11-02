@@ -2,6 +2,7 @@ const http = require('http');
 const https = require('https');
 
 const PULL_KEY = 'cjughse8qx7qm872';
+const POLL_INTERVAL_MS = 10 * 1000; // опрашиваем rtirl каждые 10 секунд
 
 // Координаты городов
 const CITIES = {
@@ -22,6 +23,15 @@ const LEGS = [
   { from: 'KHAB',     to: 'VLAD',     km: 770  }
 ];
 
+// Последнее известное состояние
+const state = {
+  lat: null,
+  lon: null,
+  updatedAt: null,   // когда последний раз успешно обновились
+  lastError: null,
+  lastRawResponse: null
+};
+
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -36,9 +46,9 @@ function distKm(lat1, lon1, lat2, lon2) {
   return haversine(lat1, lon1, lat2, lon2) / 1000;
 }
 
+// Запрос к rtirl.com по pull key
 function fetchLocation() {
   return new Promise((resolve, reject) => {
-    // Добавляем случайный параметр r, чтобы ни сервер, ни промежуточные прокси не кэшировали
     const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}&r=${Math.random()}`;
     const opts = {
       headers: {
@@ -52,70 +62,120 @@ function fetchLocation() {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        state.lastRawResponse = data;
         try {
           const json = JSON.parse(data);
-          if (!json || !json.location) return reject(new Error('no location'));
+          if (!json || !json.location) return reject(new Error('no location in response'));
           resolve({ lat: json.location.latitude, lon: json.location.longitude });
-        } catch (e) { reject(e); }
+        } catch (e) {
+          reject(new Error('parse error: ' + e.message + ' | raw: ' + data.slice(0, 200)));
+        }
       });
     }).on('error', reject);
   });
 }
 
+// Фоновый опрос
+async function pollLoop() {
+  try {
+    const { lat, lon } = await fetchLocation();
+    state.lat = lat;
+    state.lon = lon;
+    state.updatedAt = Date.now();
+    state.lastError = null;
+    console.log(`[poll ${new Date().toISOString()}] lat=${lat} lon=${lon}`);
+  } catch (e) {
+    state.lastError = e.message;
+    console.error(`[poll ${new Date().toISOString()}] error: ${e.message}`);
+  }
+  setTimeout(pollLoop, POLL_INTERVAL_MS);
+}
+
+// Расчёт сообщения по текущему состоянию
+function buildMessage() {
+  if (state.lat == null || state.lon == null) {
+    return 'Ожидание данных GPS...';
+  }
+  const lat = state.lat, lon = state.lon;
+
+  let bestLeg = null;
+  let bestScore = Infinity;
+  let bestFraction = 0;
+
+  for (const leg of LEGS) {
+    const A = CITIES[leg.from];
+    const B = CITIES[leg.to];
+
+    const dAP = distKm(lat, lon, A.lat, A.lon);
+    const dBP = distKm(lat, lon, B.lat, B.lon);
+    const dAB = distKm(A.lat, A.lon, B.lat, B.lon);
+
+    let fraction = (dAP + dBP - dAB) > 0
+      ? (dAP + dBP - dAB) / (2 * dAB)
+      : 0;
+    fraction = Math.max(0, Math.min(1, fraction));
+
+    const score = dAP + dBP - dAB;
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestLeg = leg;
+      bestFraction = fraction;
+    }
+  }
+
+  const A = CITIES[bestLeg.from];
+  const B = CITIES[bestLeg.to];
+
+  let remaining = bestLeg.km * (1 - bestFraction);
+  if (remaining < 0) remaining = 0;
+  if (remaining > bestLeg.km) remaining = bestLeg.km;
+
+  const display = remaining < 10 ? remaining.toFixed(1) : Math.round(remaining);
+  return `Мы находимся (выехали) с ${A.name}, до ${B.name} осталось ${display} км`;
+}
+
 const server = http.createServer(async (req, res) => {
-  // Заголовки, запрещающие кэширование ответа
+  // Ручное обновление: /?refresh=1 — сразу дёргает rtirl и возвращает свежее
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+  if (url.pathname === '/debug') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({
+      lat: state.lat,
+      lon: state.lon,
+      updatedAt: state.updatedAt ? new Date(state.updatedAt).toISOString() : null,
+      ageSeconds: state.updatedAt ? Math.round((Date.now() - state.updatedAt) / 1000) : null,
+      lastError: state.lastError,
+      lastRawResponse: state.lastRawResponse,
+      message: buildMessage()
+    }, null, 2));
+    return;
+  }
+
+  if (url.searchParams.get('refresh') === '1') {
+    try {
+      const { lat, lon } = await fetchLocation();
+      state.lat = lat;
+      state.lon = lon;
+      state.updatedAt = Date.now();
+      state.lastError = null;
+    } catch (e) {
+      state.lastError = e.message;
+    }
+  }
+
   res.writeHead(200, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
     'Pragma': 'no-cache',
     'Expires': '0'
   });
-
-  try {
-    const { lat, lon } = await fetchLocation();
-
-    let bestLeg = null;
-    let bestScore = Infinity;
-    let bestFraction = 0;
-
-    for (const leg of LEGS) {
-      const A = CITIES[leg.from];
-      const B = CITIES[leg.to];
-
-      const dAP = distKm(lat, lon, A.lat, A.lon);
-      const dBP = distKm(lat, lon, B.lat, B.lon);
-      const dAB = distKm(A.lat, A.lon, B.lat, B.lon);
-
-      let fraction = (dAP + dBP - dAB) > 0
-        ? (dAP + dBP - dAB) / (2 * dAB)
-        : 0;
-      fraction = Math.max(0, Math.min(1, fraction));
-
-      const score = dAP + dBP - dAB;
-
-      if (score < bestScore) {
-        bestScore = score;
-        bestLeg = leg;
-        bestFraction = fraction;
-      }
-    }
-
-    const A = CITIES[bestLeg.from];
-    const B = CITIES[bestLeg.to];
-
-    let remaining = bestLeg.km * (1 - bestFraction);
-    if (remaining < 0) remaining = 0;
-    if (remaining > bestLeg.km) remaining = bestLeg.km;
-
-    const display = remaining < 10 ? remaining.toFixed(1) : Math.round(remaining);
-    const message = `Мы находимся (выехали) с ${A.name}, до ${B.name} осталось ${display} км`;
-
-    res.end(message);
-
-  } catch (e) {
-    res.end('Не удалось определить местоположение (ошибка GPS)');
-  }
+  res.end(buildMessage());
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Listening on ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Listening on ${PORT}`);
+  pollLoop(); // запускаем фоновый опрос rtirl.com
+});
