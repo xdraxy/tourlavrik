@@ -29,7 +29,6 @@ function haversine(lat1, lon1, lat2, lon2) {
 }
 const distKm = (a,b,c,d) => haversine(a,b,c,d)/1000;
 
-// Каждый вызов — свежий запрос к rtirl, никакого state
 function fetchLocation() {
   return new Promise((resolve, reject) => {
     const url = `https://rtirl.com/api/pull?key=${encodeURIComponent(PULL_KEY)}&t=${Date.now()}&r=${Math.random()}`;
@@ -46,9 +45,14 @@ function fetchLocation() {
       res.on('data', c => data += c);
       res.on('end', () => {
         let j;
-        try { j = JSON.parse(data); } catch (e) { return reject(new Error('parse: ' + data.slice(0,100))); }
-        if (!j || !j.location || j.location.latitude == null) return reject(new Error('no location: ' + data.slice(0,100)));
-        resolve({ lat: j.location.latitude, lon: j.location.longitude, raw: data });
+        try { j = JSON.parse(data); } catch (e) { return reject(new Error('parse')); }
+        if (!j || !j.location || j.location.latitude == null) return reject(new Error('no location'));
+        resolve({
+          lat: j.location.latitude,
+          lon: j.location.longitude,
+          reportedAt: j.reportedAt || null,
+          updatedAt: j.updatedAt || null
+        });
       });
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
@@ -78,14 +82,16 @@ function buildMessage(lat, lon) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+  // debug показывает всё сырое из rtirl, включая reportedAt/updatedAt
   if (url.pathname === '/debug') {
     try {
-      const { lat, lon, raw } = await fetchLocation();
+      const { lat, lon, reportedAt, updatedAt } = await fetchLocation();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         now: new Date().toISOString(),
         lat, lon,
-        raw: raw.slice(0, 300),
+        rtirlReportedAt: reportedAt ? new Date(reportedAt).toISOString() : null,
+        rtirlUpdatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
         message: buildMessage(lat, lon)
       }, null, 2));
     } catch (e) {
@@ -95,6 +101,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Каждый запрос к корню — свежий запрос к rtirl
   try {
     const { lat, lon } = await fetchLocation();
     res.writeHead(200, {
